@@ -1,7 +1,6 @@
 fastapi
 uvicorn[standard]
 pydantic
-sentence-transformers
 pandas
 pymupdf
 langchain
@@ -13,7 +12,6 @@ langchain-google-genai
 groq
 pinecone
 langchain-pinecone
-accelerate
 motor
 pymongo
 python-dotenv
