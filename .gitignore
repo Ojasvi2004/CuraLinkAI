@@ -1,0 +1,25 @@
+# Byte-compiled / cache files
+__pycache__/
+*.py[cod]
+*$py.class
+.cache/
+
+# Environments
+.env
+venv/
+.venv/
+env/
+.env
+.env.*
+!.env.example            
+
+# Ignore large local datasets (saves Git size)
+data/medical_books/
+data/pdf_process_data/raw_pdf_text/
+data/pdf_process_data/chunks/
+data/pdf_process_data/merged_data/
+
+# IDE files
+.vscode/
+.idea/
+.DS_Store

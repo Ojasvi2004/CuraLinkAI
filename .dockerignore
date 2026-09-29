@@ -1,0 +1,11 @@
+__pycache__
+*.pyc
+.git
+.gitignore
+.env
+venv
+.venv
+.vscode
+data/medical_books
+data/pdf_process_data/raw_pdf_text
+tests
