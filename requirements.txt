@@ -12,6 +12,7 @@ langchain-google-genai
 groq
 pinecone
 langchain-pinecone
+huggingface_hub
 motor
 pymongo
 python-dotenv
