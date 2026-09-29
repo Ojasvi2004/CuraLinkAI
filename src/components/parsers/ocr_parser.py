@@ -1,7 +1,9 @@
+
 import cv2
 import os
 import re
 import shutil
+
 import numpy as np
 import pytesseract
 
@@ -49,17 +51,7 @@ class OCRReports:
         img = cv2.imread(self.path)
         if img is None:
             raise ValueError(f"Image not found: {self.path}")
-
-        # Normalize huge images (> 2200px) on load to prevent memory spikes
-        h, w = img.shape[:2]
-        max_dim = max(h, w)
-        if max_dim > 2200:
-            scale = 2200.0 / max_dim
-            img = cv2.resize(img, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
-            print(f"[OCR] Resized large image to safe resolution: {img.shape}")
-        else:
-            print(f"[OCR] Image loaded successfully: {img.shape}")
-
+        print(f"[OCR] Image loaded successfully: {img.shape}")
         return img
 
     def detect_text_regions(self, img):
@@ -89,16 +81,9 @@ class OCRReports:
         return [(x, y, w, h) for cnt in contours
                 for x, y, w, h in [cv2.boundingRect(cnt)] if w > 20 and h > 10]
 
-    def preprocess(self, img, scale=2):
-        # Prevent oversized scaling
-        h, w = img.shape[:2]
-        if max(h, w) * scale > 2400:
-            scale = max(1.0, 2400.0 / max(h, w))
-
-        if scale != 1.0:
-            img = cv2.resize(img, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
-
-        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) if len(img.shape) == 3 else img
+    def preprocess(self, img, scale=3):
+        img = cv2.resize(img, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
         gray = cv2.bilateralFilter(gray, 9, 75, 75)
         kernel = np.array([[0, -1, 0], [-1, 5, -1], [0, -1, 0]])
         sharp = cv2.filter2D(gray, -1, kernel)
@@ -122,9 +107,10 @@ class OCRReports:
         for (x, y, w, h) in zones:
             patch = img[y:y + h, x:x + w]
             area = w * h
-            zoom = 4 if area < 2000 else 2.5 if area < 8000 else 1.5
+            zoom = 6 if area < 2000 else 4 if area < 8000 else 3
             processed_patch = self.preprocess(patch, scale=zoom)
             text = pytesseract.image_to_string(processed_patch, config=config)
+            print(f"[OCR] Patch ({x}, {y}, {w}, {h}) -> {len(text.strip())} chars")
             if text.strip():
                 patch_texts.append(text.strip())
         raw_text = '\n'.join(patch_texts)
@@ -132,8 +118,7 @@ class OCRReports:
         return raw_text
 
     def extract_text_multiscale(self, img):
-        # Use optimal scales [1.5, 2.0] instead of [2, 3, 4] to save 70% RAM & 3x speed
-        scales = [1.5, 2.0]
+        scales = [2, 3, 4]
         results = []
         for scale in scales:
             print(f"[OCR] Running multi-scale OCR at scale {scale}")
@@ -147,7 +132,7 @@ class OCRReports:
         self._print_section("Raw OCR Output", raw_text)
         return raw_text
 
-    def get_confidence(self, img, scale=1.5):
+    def get_confidence(self, img, scale=3):
         processed = self.preprocess(img, scale)
         roi = self.extract_roi(processed)
         data = pytesseract.image_to_data(
@@ -159,6 +144,7 @@ class OCRReports:
         return np.mean(confidences) if confidences else 0.0
 
     def clean_text(self, text):
+       
         text = re.sub(r'[^\w\s./:,()\[\]<>+\-*%@#]', '', text)
         text = re.sub(r'\s+', ' ', text)
         return text.strip()
@@ -178,4 +164,4 @@ class OCRReports:
         clean = self.clean_text(text)
         self._print_section("Processed OCR Output", clean)
         print(f"[OCR] Extracted {len(clean)} characters")
-        return clean
+        return clean  
