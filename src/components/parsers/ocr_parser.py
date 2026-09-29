@@ -1,11 +1,24 @@
-
-import cv2
 import os
+
+# Must be set before Tesseract launches. On a fractional CPU, multi-threading
+# only causes contention and makes Tesseract slower.
+os.environ.setdefault("OMP_THREAD_LIMIT", "1")
+
 import re
 import shutil
 
+import cv2
 import numpy as np
 import pytesseract
+
+# ---- Tunables (override with env vars on Render) ---------------------------
+TARGET_WIDTH = int(os.getenv("OCR_TARGET_WIDTH", "2400"))   # upscale small images to this width
+MAX_WIDTH = int(os.getenv("OCR_MAX_WIDTH", "3200"))         # downscale only above this width
+MAX_UPSCALE = 4.0
+MAX_PIXELS = int(os.getenv("OCR_MAX_PIXELS", "12000000"))   # hard RAM cap (~12 MB grayscale)
+GOOD_CONF = float(os.getenv("OCR_GOOD_CONF", "75"))         # skip 2nd pass if mean conf >= this
+TESS_TIMEOUT = int(os.getenv("OCR_TIMEOUT", "120"))         # seconds per Tesseract call
+# ----------------------------------------------------------------------------
 
 
 def _configure_tesseract() -> None:
@@ -21,11 +34,10 @@ def _configure_tesseract() -> None:
         return
 
     if os.name == "nt":
-        windows_candidates = [
+        for candidate in (
             r"C:\Program Files\Tesseract-OCR\tesseract.exe",
             r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe",
-        ]
-        for candidate in windows_candidates:
+        ):
             if os.path.exists(candidate):
                 pytesseract.pytesseract.tesseract_cmd = candidate
                 return
@@ -36,132 +48,147 @@ def _configure_tesseract() -> None:
 
 
 class OCRReports:
-    def __init__(self, path: str):
+    def __init__(self, path: str, psm: int = 6):
+        """
+        psm 6 = one uniform block (good for lab tables / rows).
+        Try psm 4 if your reports are mostly single-column paragraphs.
+        """
         self.path = path
+        self.config = f"--oem 1 --psm {psm} -c preserve_interword_spaces=1"
         _configure_tesseract()
 
+    # ------------------------------------------------------------------ utils
     def _print_section(self, title: str, text: str) -> None:
         print(f"\n[OCR] {title}")
         print("[OCR]" + "-" * 60)
         print(text if text else "[OCR] <empty>")
         print("[OCR]" + "-" * 60)
 
+    # ---------------------------------------------------------------- loading
     def load_image(self):
         print(f"[OCR] Loading image: {self.path}")
-        img = cv2.imread(self.path)
+        # Load straight to grayscale: 1/3 the memory of a BGR image.
+        img = cv2.imread(self.path, cv2.IMREAD_GRAYSCALE)
         if img is None:
             raise ValueError(f"Image not found: {self.path}")
-        print(f"[OCR] Image loaded successfully: {img.shape}")
+        print(f"[OCR] Image loaded: {img.shape}")
         return img
 
-    def detect_text_regions(self, img):
-        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        mser = cv2.MSER_create(5, 30, 3000)
-        regions, _ = mser.detectRegions(gray)
-        boxes = []
-        for region in regions:
-            x, y, w, h = cv2.boundingRect(region.reshape(-1, 1, 2))
-            aspect = w / float(h) if h > 0 else 0
-            if 0.1 < aspect < 15 and 8 < h < 80:
-                boxes.append((x, y, w, h))
-        return boxes
-
-    def merge_boxes_into_zones(self, boxes, img_shape, margin=10):
-        if not boxes:
-            return []
-        h_img, w_img = img_shape[:2]
-        mask = np.zeros((h_img, w_img), dtype=np.uint8)
-        for (x, y, w, h) in boxes:
-            x1, y1 = max(0, x - margin), max(0, y - margin)
-            x2, y2 = min(w_img, x + w + margin), min(h_img, y + h + margin)
-            mask[y1:y2, x1:x2] = 255
-        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (margin * 2, margin))
-        mask = cv2.dilate(mask, kernel, iterations=2)
-        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        return [(x, y, w, h) for cnt in contours
-                for x, y, w, h in [cv2.boundingRect(cnt)] if w > 20 and h > 10]
-
-    def preprocess(self, img, scale=3):
-        img = cv2.resize(img, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
-        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        gray = cv2.bilateralFilter(gray, 9, 75, 75)
-        kernel = np.array([[0, -1, 0], [-1, 5, -1], [0, -1, 0]])
-        sharp = cv2.filter2D(gray, -1, kernel)
-        _, thresh = cv2.threshold(sharp, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-        return thresh
-
-    def extract_roi(self, img):
+    # ---------------------------------------------------------- preprocessing
+    def _normalize_size(self, img):
+        """
+        Tesseract is most accurate when text is ~300 DPI (page ~2400px wide).
+        Small images are upscaled to that; huge ones are only shrunk if very large.
+        A single well-chosen scale replaces the 3-scale loop of the heavy version.
+        """
         h, w = img.shape
-        return img[int(h * 0.15):int(h * 0.95), :]
+        if w < TARGET_WIDTH:
+            scale = min(TARGET_WIDTH / w, MAX_UPSCALE)
+        elif w > MAX_WIDTH:
+            scale = MAX_WIDTH / w
+        else:
+            scale = 1.0
 
-    def ocr_zoomed_patches(self, img):
-        boxes = self.detect_text_regions(img)
-        print(f"[OCR] Detected {len(boxes)} text regions")
-        zones = self.merge_boxes_into_zones(boxes, img.shape)
-        if not zones:
-            zones = [(0, 0, img.shape[1], img.shape[0])]
-        print(f"[OCR] OCR zones selected: {len(zones)}")
-        zones = sorted(zones, key=lambda z: (z[1], z[0]))
-        config = r'--oem 3 --psm 6 -c preserve_interword_spaces=1'
-        patch_texts = []
-        for (x, y, w, h) in zones:
-            patch = img[y:y + h, x:x + w]
-            area = w * h
-            zoom = 6 if area < 2000 else 4 if area < 8000 else 3
-            processed_patch = self.preprocess(patch, scale=zoom)
-            text = pytesseract.image_to_string(processed_patch, config=config)
-            print(f"[OCR] Patch ({x}, {y}, {w}, {h}) -> {len(text.strip())} chars")
-            if text.strip():
-                patch_texts.append(text.strip())
-        raw_text = '\n'.join(patch_texts)
-        self._print_section("Raw OCR Output", raw_text)
-        return raw_text
+        if h * w * scale * scale > MAX_PIXELS:           # protect RAM
+            scale = (MAX_PIXELS / float(h * w)) ** 0.5
 
-    def extract_text_multiscale(self, img):
-        scales = [2, 3, 4]
-        results = []
-        for scale in scales:
-            print(f"[OCR] Running multi-scale OCR at scale {scale}")
-            processed = self.preprocess(img, scale)
-            roi = self.extract_roi(processed)
-            config = r'--oem 3 --psm 6 -c preserve_interword_spaces=1'
-            text = pytesseract.image_to_string(roi, config=config)
-            print(f"[OCR] Scale {scale} produced {len(text.strip())} chars")
-            results.append(text)
-        raw_text = max(results, key=len)
-        self._print_section("Raw OCR Output", raw_text)
-        return raw_text
+        if abs(scale - 1.0) < 0.05:
+            return img
+        interp = cv2.INTER_CUBIC if scale > 1 else cv2.INTER_AREA
+        out = cv2.resize(img, None, fx=scale, fy=scale, interpolation=interp)
+        print(f"[OCR] Rescaled x{scale:.2f} -> {out.shape}")
+        return out
 
-    def get_confidence(self, img, scale=3):
-        processed = self.preprocess(img, scale)
-        roi = self.extract_roi(processed)
-        data = pytesseract.image_to_data(
-            roi, config=r'--oem 3 --psm 6',
-            output_type=pytesseract.Output.DICT
+    def _flatten_background(self, gray):
+        """
+        Removes shadows / uneven phone-camera lighting cheaply.
+        Background is estimated on a 1/8-size copy, so it costs almost nothing
+        (replaces the very slow bilateralFilter on a 3-4x upscaled image).
+        """
+        h, w = gray.shape
+        small = cv2.resize(gray, (max(1, w // 8), max(1, h // 8)), interpolation=cv2.INTER_AREA)
+        small = cv2.dilate(small, np.ones((5, 5), np.uint8))   # erases dark text strokes
+        small = cv2.GaussianBlur(small, (0, 0), 3)
+        bg = cv2.resize(small, (w, h), interpolation=cv2.INTER_LINEAR)
+        return cv2.divide(gray, np.maximum(bg, 1), scale=255)
+
+    def preprocess(self, gray):
+        """Pass 1: clean grayscale (Tesseract's own binarisation is usually best)."""
+        gray = self._normalize_size(gray)
+        return self._flatten_background(gray)
+
+    def preprocess_binary(self, norm):
+        """Pass 2 (only if pass 1 was weak): adaptive threshold for faint/noisy scans."""
+        blurred = cv2.medianBlur(norm, 3)
+        return cv2.adaptiveThreshold(
+            blurred, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 35, 15
         )
-        confidences = [int(c) for c in data['conf']
-                       if str(c).lstrip('-').isdigit() and int(c) >= 0]
-        return np.mean(confidences) if confidences else 0.0
 
-    def clean_text(self, text):
-       
-        text = re.sub(r'[^\w\s./:,()\[\]<>+\-*%@#]', '', text)
-        text = re.sub(r'\s+', ' ', text)
+    # -------------------------------------------------------------------- OCR
+    def _ocr(self, img):
+        """
+        One Tesseract call gives text AND confidence
+        (the old code ran OCR twice: once just to measure confidence).
+        Returns (text, mean_confidence, good_word_count).
+        """
+        data = pytesseract.image_to_data(
+            img,
+            config=self.config,
+            output_type=pytesseract.Output.DICT,
+            timeout=TESS_TIMEOUT,
+        )
+        lines, confs = {}, []
+        for i, word in enumerate(data["text"]):
+            word = word.strip()
+            if not word:
+                continue
+            try:
+                conf = float(data["conf"][i])
+            except (TypeError, ValueError):
+                continue
+            if conf < 0:
+                continue
+            key = (data["block_num"][i], data["par_num"][i], data["line_num"][i])
+            lines.setdefault(key, []).append((data["left"][i], word))
+            confs.append(conf)
+
+        text = "\n".join(
+            " ".join(w for _, w in sorted(words)) for _, words in sorted(lines.items())
+        )
+        mean_conf = float(np.mean(confs)) if confs else 0.0
+        good_words = sum(1 for c in confs if c >= 70)
+        return text, mean_conf, good_words
+
+    # --------------------------------------------------------------- cleaning
+    def clean_text(self, text, keep_lines=True):
+        # Only strip control characters. Medical reports need symbols like
+        # ° µ ± = ' " ; | & ^ so we do NOT use a character whitelist.
+        text = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", "", text)
+        if keep_lines:
+            text = re.sub(r"[ \t]+", " ", text)
+            text = re.sub(r"\n\s*\n+", "\n", text)
+        else:
+            text = re.sub(r"\s+", " ", text)
         return text.strip()
 
-    def run(self):
-        img = self.load_image()
-        confidence = self.get_confidence(img)
-        print(f"[OCR] Confidence score: {confidence:.1f}")
+    # -------------------------------------------------------------------- run
+    def run(self, keep_lines=True):
+        gray = self.load_image()
+        norm = self.preprocess(gray)
+        del gray
 
-        if confidence < 70:
-            print("[OCR] Low confidence -> using zoomed patch OCR")
-            text = self.ocr_zoomed_patches(img)
-        else:
-            print("[OCR] High confidence -> using multi-scale OCR")
-            text = self.extract_text_multiscale(img)
+        text, conf, good = self._ocr(norm)
+        print(f"[OCR] Pass 1: conf={conf:.1f}, good words={good}")
 
-        clean = self.clean_text(text)
+        if conf < GOOD_CONF:
+            print("[OCR] Low confidence -> trying adaptive-threshold pass")
+            binary = self.preprocess_binary(norm)
+            text2, conf2, good2 = self._ocr(binary)
+            print(f"[OCR] Pass 2: conf={conf2:.1f}, good words={good2}")
+            if good2 > good:
+                text, conf = text2, conf2
+
+        clean = self.clean_text(text, keep_lines=keep_lines)
         self._print_section("Processed OCR Output", clean)
-        print(f"[OCR] Extracted {len(clean)} characters")
-        return clean  
+        print(f"[OCR] Extracted {len(clean)} characters (confidence {conf:.1f})")
+        return clean
