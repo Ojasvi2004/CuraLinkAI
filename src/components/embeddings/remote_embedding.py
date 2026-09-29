@@ -17,7 +17,6 @@ class HFInferenceEmbeddings(Embeddings):
             texts,
             model=self.model_name
         )
-        # Convert numpy array to list if needed
         return res.tolist() if hasattr(res, "tolist") else [list(e) for e in res]
 
     def embed_query(self, text: str) -> List[float]:
@@ -26,10 +25,8 @@ class HFInferenceEmbeddings(Embeddings):
             text,
             model=self.model_name
         )
-        # Convert numpy array to list
         vector = res.tolist() if hasattr(res, "tolist") else list(res)
         
-        # If response is 2D (e.g. [[0.1, 0.2...]]), extract the 1D vector [0.1, 0.2...]
         if isinstance(vector, list) and len(vector) > 0 and isinstance(vector[0], list):
             return vector[0]
         return vector

@@ -8,7 +8,7 @@ load_dotenv()
 if "HF_HOME" not in os.environ and os.path.exists("E:/hf_cache"):
     os.environ["HF_HOME"] = "E:/hf_cache"
 
-from sentence_transformers import SentenceTransformer
+# from sentence_transformers import SentenceTransformer
 from langchain_core.embeddings import Embeddings
 from langchain_core.documents import Document
 from pinecone import Pinecone, ServerlessSpec
@@ -18,18 +18,18 @@ from configurations.config import EMBEDDING_DIRECTORY, META_DATA_DIRECTORY, CHUN
 
 _shared_embedding_model = None
 
-class RealEmbeddings(Embeddings):
-    def __init__(self, model_name="BAAI/bge-base-en-v1.5"):
-        global _shared_embedding_model
-        if _shared_embedding_model is None:
-            _shared_embedding_model = SentenceTransformer(model_name)
-        self.model = _shared_embedding_model
+# class RealEmbeddings(Embeddings):
+#     def __init__(self, model_name="BAAI/bge-base-en-v1.5"):
+#         global _shared_embedding_model
+#         if _shared_embedding_model is None:
+#             _shared_embedding_model = SentenceTransformer(model_name)
+#         self.model = _shared_embedding_model
 
-    def embed_documents(self, texts):
-        return self.model.encode(texts, normalize_embeddings=True).tolist()
+#     def embed_documents(self, texts):
+#         return self.model.encode(texts, normalize_embeddings=True).tolist()
 
-    def embed_query(self, text):
-        return self.model.encode(text, normalize_embeddings=True).tolist()
+#     def embed_query(self, text):
+#         return self.model.encode(text, normalize_embeddings=True).tolist()
 
 def get_pinecone_client():
     api_key = os.getenv("PINECONE_API_KEY")

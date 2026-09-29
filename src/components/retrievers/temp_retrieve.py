@@ -22,7 +22,7 @@ from langchain_core.runnables import RunnableLambda, RunnableSequence
 from langchain_pinecone import PineconeVectorStore
 from pinecone import Pinecone
 
-from components.vector_store.pinecone_store import RealEmbeddings
+# from components.vector_store.pinecone_store import RealEmbeddings
 from components.embeddings.remote_embedding import HFInferenceEmbeddings
 from components.prompts.query_prompt import prompt1
 
