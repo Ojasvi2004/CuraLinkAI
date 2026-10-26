@@ -23,7 +23,7 @@ from langchain_pinecone import PineconeVectorStore
 from pinecone import Pinecone
 
 # from components.vector_store.pinecone_store import RealEmbeddings
-from components.embeddings.remote_embedding import HFInferenceEmbeddings
+from components.embeddings.remote_embedding import CloudflareWorkersAIEmbeddings
 from components.prompts.query_prompt import prompt1
 
 def get_llm():
@@ -57,7 +57,7 @@ def get_llm():
 
 llm = get_llm()
 
-embeddings = HFInferenceEmbeddings()
+embeddings = CloudflareWorkersAIEmbeddings()
 
 pinecone_api_key = os.getenv("PINECONE_API_KEY")
 vector_store = PineconeVectorStore(
@@ -72,7 +72,7 @@ def rag_chain_lcel(vector_store):
     def retrieve_and_format(x):
         query = x.get("query", "").strip()
         docs = retriever.invoke(query) if query else []
-
+        print(f"\n--- [Retrieved {len(docs)} Chunks for Query: '{query}'] ---")
         formatted_docs = []
         for i, d in enumerate(docs, 1):
             source = d.metadata.get("source_file", "Medical Knowledge Reference")
